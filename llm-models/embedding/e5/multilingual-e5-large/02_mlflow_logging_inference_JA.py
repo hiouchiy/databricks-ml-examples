@@ -5,15 +5,9 @@
 # MAGIC この例では、[multilingual-e5-large model](https://huggingface.co/intfloat/multilingual-e5-large)を `sentence_transformers` フレーバーで MLFLow にロギングし、Unity Catalog でモデルを管理し、モデル提供エンドポイントを作成する方法を示します。
 # MAGIC
 # MAGIC このノートブックの環境
-# MAGIC - ランタイム: 14.1 GPU ML Runtime
-# MAGIC - インスタンス: AWS の `g4dn.xlarge` または Azure の `Standard_NC4as_T4_v3` 
+# MAGIC - ランタイム: 15.2 ML Runtime
+# MAGIC - インスタンス: AWS の `i3.xlarge` または Azure の `Standard_D4DS_v5` 
 # MAGIC
-
-# COMMAND ----------
-
-# DBTITLE 1,必要なライブラリのインストール
-# MAGIC %pip install mlflow==2.9.0 langchain==0.0.344 databricks-vectorsearch==0.22 databricks-sdk==0.12.0 mlflow[databricks]
-# MAGIC dbutils.library.restartPython()
 
 # COMMAND ----------
 
@@ -65,14 +59,14 @@ mlflow.set_registry_uri("databricks-uc")
 # COMMAND ----------
 
 # MAGIC %sql
-# MAGIC USE CATALOG hiroshi;
+# MAGIC USE CATALOG japan_practical_demo;
 # MAGIC CREATE SCHEMA IF NOT EXISTS models;
 
 # COMMAND ----------
 
 # Unityカタログへのモデル登録
 
-registered_name = "hiroshi.models.multilingual-e5-large" # UCモデル名は<カタログ名>.<スキーマ名>.<モデル名>のパターンに従っており、カタログ名、スキーマ名、登録モデル名に対応していることに注意してください。
+registered_name = "japan_practical_demo.models.multilingual-e5-large" # UCモデル名は<カタログ名>.<スキーマ名>.<モデル名>のパターンに従っており、カタログ名、スキーマ名、登録モデル名に対応していることに注意してください。
 result = mlflow.register_model(
     "runs:/"+run.info.run_id+"/multilingual-e5-large-embedding",
     registered_name,
@@ -114,7 +108,7 @@ loaded_model.predict(
 # COMMAND ----------
 
 # サービングエンドポイントの名前を指定
-endpoint_name = 'multilingual-e5-large-embedding-hiroshi'
+endpoint_name = 'multilingual-e5-large-embedding'
 
 # COMMAND ----------
 
@@ -125,7 +119,7 @@ token = dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiTok
 
 # サービングエンドポイントの作成または更新
 from databricks.sdk import WorkspaceClient
-from databricks.sdk.service.serving import EndpointCoreConfigInput, ServedModelInput
+from databricks.sdk.service.serving import EndpointCoreConfigInput, ServedModelInput, ServedModelInputWorkloadSize, ServedModelInputWorkloadType
 
 model_version = result  # mlflow.register_modelの返された結果
 
@@ -140,8 +134,8 @@ endpoint_config = EndpointCoreConfigInput(
         ServedModelInput(
             model_name=model_name,
             model_version=latest_model_version,
-            workload_type="GPU_SMALL",
-            workload_size="Small",
+            workload_type=ServedModelInputWorkloadType.GPU_SMALL,
+            workload_size=ServedModelInputWorkloadSize.SMALL,
             scale_to_zero_enabled=False
         )
     ]
@@ -163,7 +157,21 @@ displayHTML(f'Your Model Endpoint Serving is now available. Open the <a href="/m
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC モデルサービングエンドポイントの準備ができたら、同じワークスペースで実行されているLangChainで簡単にクエリできます。
+# MAGIC モデルサービングエンドポイントの準備ができたら、同じワークスペースで実行されているMLflow Deployments SDKで簡単にクエリできます。
+
+# COMMAND ----------
+
+import mlflow.deployments
+
+client = mlflow.deployments.get_deploy_client("databricks")
+
+embeddings_response = client.predict(
+    endpoint=endpoint_name,
+    inputs={
+        "inputs": ["おはようございます"]
+    }
+)
+embeddings_response['predictions']
 
 # COMMAND ----------
 
@@ -178,3 +186,7 @@ end = time.time()
 
 print(endpoint_response)
 print(f'Time taken for querying endpoint in seconds: {end-start}')
+
+# COMMAND ----------
+
+

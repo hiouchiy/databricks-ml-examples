@@ -5,7 +5,7 @@
 # MAGIC [multilingual-e5-large (Embedding)モデル](https://huggingface.co/intfloat/multilingual-e5-large)は、任意のテキストを検索、分類、クラスタリング、意味検索などのタスクに使用できる低次元の密なベクトルにマッピングすることができます。また、LLMのベクトルデータベースにも利用できます。
 # MAGIC
 # MAGIC このノートブックの環境
-# MAGIC - ランタイム: 14.1 GPU ML Runtime
+# MAGIC - ランタイム: 15.2 ML Runtime
 # MAGIC - インスタンス: AWS の `g4dn.xlarge` または Azure の `Standard_NC4as_T4_v3`
 
 # COMMAND ----------
