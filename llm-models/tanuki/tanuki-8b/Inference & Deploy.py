@@ -1,5 +1,12 @@
 # Databricks notebook source
 # MAGIC %md
+# MAGIC Runtime: 15.4 ML GPU
+# MAGIC
+# MAGIC Node: AWS or Azure VM instance including more than a A10 GPUs
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## モデルを推論する
 # MAGIC
 # MAGIC まずはモデルをダウンロードして、推論してみる。
