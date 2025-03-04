@@ -12,7 +12,7 @@
 # COMMAND ----------
 
 # MAGIC %pip install hf_transfer
-# MAGIC %pip install -U mlflow==2.19.0 threadpoolctl==3.5.0 transformers==4.49.0
+# MAGIC %pip install -U mlflow==2.19.0 threadpoolctl==3.5.0 transformers==4.49.0 vllm==0.7.3
 # MAGIC dbutils.library.restartPython()
 
 # COMMAND ----------
@@ -54,58 +54,34 @@ registered_model_name = "hiroshi.models.deepseek-r1-distill-qwen-14b-japanese"
 # COMMAND ----------
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from vllm import LLM, SamplingParams
 
-model = AutoModelForCausalLM.from_pretrained(MODEL_PATH, device_map="auto", torch_dtype=torch.bfloat16)
+# For generative models (task=generate) only
+llm = LLM(model=MODEL_PATH, task="generate", tensor_parallel_size=torch.cuda.device_count())
+
+sampling_params = SamplingParams(
+  temperature=0.1, 
+  top_p=0.8, 
+  top_k=5, 
+  max_tokens=512, 
+  presence_penalty=1.1)
 
 # COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## Load a tokenizer with custom "chat_template" and run inference with a ChatCompletion-style prompt
-
-# COMMAND ----------
-
-
-tokenizer = AutoTokenizer.from_pretrained(
-  MODEL_PATH,
-)
-
-instruction = "日本の首都はどこ？"
 
 messages = [
-    {"role": "user", "content": instruction},
+    {"role": "user", "content": "日本の首都はどこ？"},
 ]
-
-input_ids = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt").to(model.device)
-# inputs = tokenizer(messages, return_tensors="pt").to(model.device)
-output_ids = model.generate(input_ids,
-                            max_new_tokens=512,
-                            temperature=0.1,
-                            do_sample=True)
-output = tokenizer.decode(output_ids[0], skip_special_tokens=True)
-print(output)
-
+output = llm.chat(
+    messages, 
+    sampling_params=sampling_params, 
+    use_tqdm=False)
+print(output[0].outputs[0].text)
 
 # COMMAND ----------
 
-# MAGIC %md
-# MAGIC ## Build a pipeline and run inference again to check ChatCompletion prompt works correctly
-
-# COMMAND ----------
-
-from transformers import pipeline
 from mlflow.types.llm import ChatCompletionResponse, ChatMessage, ChatParams, ChatChoice
-
-generator = pipeline(
-    "text-generation",
-    tokenizer=tokenizer,
-    model=model,
-)
-answer = generator(messages, max_new_tokens=1000)
-assistant_message = answer[0]["generated_text"][-1]
-
 output = ChatCompletionResponse(
-    choices=[ChatChoice(index=0, message=ChatMessage(**assistant_message))],
+    choices=[ChatChoice(index=0, message=ChatMessage(role="assistant", content=output[0].outputs[0].text))],
     usage={},
     model="cyberagent/DeepSeek-R1-Distill-Qwen-14B-Japanese",
 )
@@ -113,7 +89,13 @@ output.to_dict()
 
 # COMMAND ----------
 
-answer
+import torch
+import gc
+
+# パイプラインを削除し、メモリーを解放します
+del llm
+gc.collect()
+torch.cuda.empty_cache()
 
 # COMMAND ----------
 
@@ -135,10 +117,9 @@ from mlflow.types.llm import (
 )
 import pandas as pd
 import mlflow
-from openai import OpenAI
-from transformers import AutoTokenizer
+from vllm import LLM, SamplingParams
 
-class QwenChatCompletionModel(ChatModel):
+class DeepSeekQwenChatCompletionModel(ChatModel):
     """
     Defines a custom agent that processes ChatCompletionRequests
     and returns ChatCompletionResponses.
@@ -147,28 +128,17 @@ class QwenChatCompletionModel(ChatModel):
         """
         コンストラクタ
         """
+        import os
+        os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+        self.llm = LLM(model="cyberagent/DeepSeek-R1-Distill-Qwen-14B-Japanese", task="generate", tensor_parallel_size=torch.cuda.device_count())
 
     
-    def load_context(self, context):
-        """
-        コンテキストの設定
-        """
+    # def load_context(self, context):
+    #     """
+    #     コンテキストの設定
+    #     """
 
-        model = AutoModelForCausalLM.from_pretrained(
-          context.artifacts["model-path"], 
-          device_map="auto", 
-          torch_dtype=torch.bfloat16
-        )
-
-        tokenizer = AutoTokenizer.from_pretrained(
-          context.artifacts["model-path"],
-        )
-        
-        self.generator = pipeline(
-          "text-generation",
-          tokenizer=tokenizer,
-          model=model,
-        )
+    #     self.llm = LLM(model=context.artifacts["model-path"], task="generate", tensor_parallel_size=torch.cuda.device_count())
 
     def _build_prompt(self, message):
         """
@@ -196,13 +166,21 @@ class QwenChatCompletionModel(ChatModel):
                 messages_list.append(message.to_dict())
 
             param_dict = params.to_dict()
-            for param_name in ['max_tokens', 'stop', 'n', 'stream']:
+            for param_name in ['stop', 'n', 'stream']:
                 value = param_dict.pop(param_name, None)
-                if param_name == 'max_tokens':
-                    param_dict['max_new_tokens'] = value
 
-            answer = self.generator(messages_list, **param_dict) # 入力をmessagesからmodel_input_listに変更
-            assistant_message = answer[0]["generated_text"][-1] # assistant_messageの抽出をanwserの構造に合わせて変更
+            sampling_params = SamplingParams(
+                temperature=param_dict.get("temperature", 0.5), 
+                top_p=param_dict.get("top_p", 0.8), 
+                top_k=param_dict.get("top_k", 5), 
+                max_tokens=param_dict.get("max_tokens", 200), 
+                presence_penalty=param_dict.get("presence_penalty", 1.1))
+            answer = self.llm.chat(
+                messages_list, 
+                sampling_params=sampling_params, 
+                use_tqdm=False)
+            assistant_message = answer[0].outputs[0].text
+
             span.set_inputs({"messages": messages, "params": params})
             span.set_outputs({"answer": answer})
         
@@ -211,7 +189,7 @@ class QwenChatCompletionModel(ChatModel):
         # ChatCompletionResponseの形式で返さないと後々エラーとなる。
         with mlflow.start_span(name="create_response") as span:
             response = ChatCompletionResponse(
-                choices=[ChatChoice(index=0, message=ChatMessage(**assistant_message))],
+                choices=[ChatChoice(index=0, message=ChatMessage(role="assistant", content=assistant_message))],
                 usage={},
                 model="cyberagent/DeepSeek-R1-Distill-Qwen-14B-Japanese",
             )
@@ -229,18 +207,130 @@ mlflow.set_registry_uri("databricks-uc")
 
 with mlflow.start_run():
     logged_agent_info = mlflow.pyfunc.log_model(
-        python_model=QwenChatCompletionModel(),
+        python_model=DeepSeekQwenChatCompletionModel(),
         artifact_path="model",
         pip_requirements=[
           "mlflow==2.19.0", 
-          "torch==2.3.1", 
-          "transformers==4.49.0", 
+          "torch==2.5.1", 
+          "transformers==4.45.2", 
           "accelerate==0.31.0", 
           "threadpoolctl==3.5.0",
+          "vllm==0.7.3",
           "hf_transfer"],
         artifacts={'model-path': MODEL_PATH},
         registered_model_name=registered_model_name
     )
+
+# COMMAND ----------
+
+import mlflow
+import torch
+from mlflow.types.llm import ChatCompletionResponse, ChatMessage, ChatParams, ChatChoice
+from vllm import LLM, SamplingParams
+
+class DeepSeekQwenModel(mlflow.pyfunc.PythonModel):
+  
+  def load_context(self, context): 
+
+    # For generative models (task=generate) only
+    self.llm = LLM(model=context.artifacts["model-path"], task="generate", tensor_parallel_size=torch.cuda.device_count())
+    
+  def predict(self, context, model_input, params=None):
+    print(model_input, flush=True)
+    print(params, flush=True)
+    if isinstance(model_input, pd.DataFrame):
+      # model_input = model_input.to_dict(orient="records")[0]
+      model_input = model_input.to_dict()['messages'] # 入力の整形方法を変更
+      model_input_list = list(model_input.values())
+
+    sampling_params = SamplingParams(
+      temperature=params.get("temperature", 0.5), 
+      top_p=params.get("top_p", 0.8), 
+      top_k=params.get("top_k", 5), 
+      max_tokens=params.get("max_new_tokens", 200), 
+      presence_penalty=params.get("presence_penalty", 1.1))
+    
+    answer = self.llm.chat(
+      model_input_list, 
+      sampling_params=sampling_params, 
+      use_tqdm=False)
+
+    assistant_message = answer[0].outputs[0].text
+
+    response = ChatCompletionResponse(
+        choices=[ChatChoice(index=0, message=ChatMessage(role="assistant", content=assistant_message))],
+        usage={},
+        model="cyberagent/DeepSeek-R1-Distill-Qwen-14B-Japanese",
+    )
+
+    return response.to_dict()
+
+# COMMAND ----------
+
+import numpy as np
+import pandas as pd
+
+import mlflow
+from mlflow.models import infer_signature
+
+with mlflow.start_run(run_name="deepseek-qwen-instruct-vllm"):
+  # 入出力スキーマの定義
+  input_example = {
+    "messages": [
+        {
+            "role": "user",
+            "content": "日本の首都はどこ？",
+        }
+    ],
+  }
+
+  output_response = {
+    'id': 'chatcmpl_e048d1af-4b9c-4cc9-941f-0311ac5aa7ab',
+    'choices': [
+      {
+        'finish_reason': 'stop', 
+        'index': 0,
+        'logprobs': "",
+        'message': {
+          'content': '首都は東京です。',
+          'role': 'assistant'
+          }
+        }
+      ],
+    'created': 1719722525,
+    'model': 'dbrx-instruct-032724',
+    'object': 'chat.completion',
+    'usage': {'completion_tokens': 74, 'prompt_tokens': 803, 'total_tokens': 877}
+  }
+
+  params={
+    "max_new_tokens": 512,
+    "temperature": 0.1,
+    "do_sample": True,
+  }
+
+  signature = infer_signature(
+    model_input=input_example, 
+    model_output=output_response, 
+    params=params)
+  
+  logged_chain_info = mlflow.pyfunc.log_model(
+    python_model=DeepSeekQwenModel(),
+    artifact_path="model",
+    signature=signature, 
+    input_example=input_example,
+    example_no_conversion=True,
+    pip_requirements=[
+      "mlflow==2.19.0", 
+      "torch==2.5.1", 
+      "transformers==4.49.0", 
+      "accelerate==0.31.0", 
+      "vllm==0.7.3", 
+      "threadpoolctl==3.5.0",
+      "hf_transfer"],
+    artifacts={'model-path': MODEL_PATH},
+    registered_model_name=registered_model_name,
+  )
 
 # COMMAND ----------
 
@@ -281,7 +371,7 @@ from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.serving import EndpointCoreConfigInput, ServedModelInput, ServedModelInputWorkloadSize, ServedModelInputWorkloadType
 
 # サービングエンドポイントの名前を指定
-endpoint_name = 'hiroshi-deepseek-qwen25-14b-instruct-gpu-serving'
+endpoint_name = 'hiroshi-deepseek-qwen25-14b-instruct-gpu-vllm'
 serving_endpoint_name = endpoint_name
 latest_model_version = latest_version
 model_name = registered_model_name
@@ -361,7 +451,7 @@ client = OpenAI(
     base_url=f"{API_ROOT}/serving-endpoints"
 )
 
-endpoint_name = "hiroshi-deepseek-qwen25-14b-instruct-gpu-serving"
+endpoint_name = "hiroshi-deepseek-qwen25-14b-instruct-gpu-vllm"
 response = client.chat.completions.create(
     model=endpoint_name,
     messages=[{"role": "user", "content": "日本の首都はどこ？"}],
