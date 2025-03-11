@@ -152,7 +152,7 @@ import pandas as pd
 import mlflow
 from mlflow.models import infer_signature
 
-with mlflow.start_run(run_name="deepseek-qwen-instruct-vllm"):
+with mlflow.start_run(run_name="qwq-32b-instruct-vllm"):
   # 入出力スキーマの定義
   input_example = {
     "messages": [
@@ -203,7 +203,7 @@ with mlflow.start_run(run_name="deepseek-qwen-instruct-vllm"):
       "mlflow==2.19.0", 
       "autoawq==0.2.5", 
       "transformers==4.49.0", 
-      "accelerate==0.31.1", 
+      "accelerate==0.30.1", 
       "vllm==0.7.3", 
       "hf_transfer"],
     artifacts={'model-path': MODEL_PATH},
