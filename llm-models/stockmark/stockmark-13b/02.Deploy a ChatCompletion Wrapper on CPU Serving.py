@@ -9,7 +9,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install -U -qqqq databricks-agents==0.12.0 mlflow>=2.19.0 openai==1.59.9 transformers==4.48.1
+# MAGIC %pip install -U -qqqq databricks-agents==0.17.2 mlflow==2.20.4 openai==1.59.9 transformers==4.48.1 torch==2.6.0
 # MAGIC dbutils.library.restartPython()
 
 # COMMAND ----------
@@ -68,9 +68,16 @@ os.environ["DATABRICKS_TOKEN"] = API_TOKEN
 
 input_example = [{"role": "user", "content": "日本の首都は京都でしたっけ？"}]
 
-chat_model = StockmarkChatModel()
+chat_model = StockmarkChatCompletionWrapper()
 chat_model.load_context(None)
-chat_model.predict(None, messages=input_example, params=ChatParams(temperature=0.1, max_tokens=50))
+
+# Normal predict
+response = chat_model.predict(None, messages=input_example, params=ChatParams(temperature=0.1, max_tokens=50))
+print(response.to_dict())
+
+# Streaming predict
+for event in chat_model.predict_stream(context=None, messages=input_example, params=ChatParams(temperature=0.1, max_tokens=50)):
+    print(event.choices[0].delta.content)
 
 # COMMAND ----------
 
@@ -103,12 +110,13 @@ mlflow.set_registry_uri("databricks-uc")
 
 with mlflow.start_run():
     logged_agent_info = mlflow.pyfunc.log_model(
-        python_model=chain_notebook_path,
+        python_model=wrapper_notebook_path,
         model_config=config_file_path,
         artifact_path="chat_model_wrapper",
         pip_requirements=[
           "openai==1.59.9", 
-          "transformers==4.48.1"],
+          "transformers==4.48.1", 
+          "torch==2.6.0"],
         registered_model_name=UC_MODEL_NAME
     )
 
@@ -152,6 +160,21 @@ registered_wrapper.predict(
 
 # COMMAND ----------
 
+for chunk in registered_wrapper.predict_stream(
+    {
+    "messages": input_example, 
+    "temperature": 0.1, 
+    "max_tokens": 100
+  }
+):
+    if not chunk["choices"] or not chunk["choices"][0]["delta"]["content"]:
+        continue
+
+    print(chunk["choices"][0]["delta"]["content"])
+
+
+# COMMAND ----------
+
 # MAGIC %md
 # MAGIC ## Deploy the wrapper uging Mosaic AI Agent Framework
 
@@ -179,3 +202,7 @@ review_instructions = """### Stockmark-13b ChatCompletion Wrapper テスト
 チャットボットの評価にお時間を割いていただき、ありがとうございます。エンドユーザーに高品質の製品をお届けするためには、皆様のご協力が不可欠です。"""
 
 agents.set_review_instructions(UC_MODEL_NAME, review_instructions)
+
+# COMMAND ----------
+
+

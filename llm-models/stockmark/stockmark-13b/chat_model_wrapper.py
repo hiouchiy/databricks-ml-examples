@@ -4,7 +4,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install -U -qqqq mlflow==2.19.0 openai==1.59.9 transformers==4.48.1
+# MAGIC %pip install -U -qqqq mlflow==2.20.4 openai==1.59.9 transformers==4.48.1 torch==2.6.0
 # MAGIC dbutils.library.restartPython()
 
 # COMMAND ----------
@@ -115,7 +115,7 @@ class StockmarkChatCompletionWrapper(ChatModel):
 
         return ChatCompletionResponse.from_dict(response_dict)
 
-    def _create_chat_completion_chunk(self, content) -> ChatCompletionChunk:
+    def _create_chat_completion_chunk(self, content, id) -> ChatCompletionChunk:
         """Helper for constructing a ChatCompletionChunk instance for wrapping streaming agent output"""
         return ChatCompletionChunk(
                 choices=[ChatChunkChoice(
@@ -129,10 +129,40 @@ class StockmarkChatCompletionWrapper(ChatModel):
     def predict_stream(
         self, context, messages: List[ChatMessage], params: ChatParams
     ) -> Generator[ChatCompletionChunk, None, None]:
-        last_user_question_text = messages[-1].content
-        yield self._create_chat_completion_chunk(f"Echoing back your last question, word by word. You sent me this request from a client with type: ")
-        for word in last_user_question_text.split(" "):
-            yield self._create_chat_completion_chunk(word)
+        """
+        推論メイン
+        """
+
+        # プロンプトの構築
+        with mlflow.start_span(name="_build_prompt") as span:
+            prompt = self._build_prompt(messages)
+            span.set_inputs({"original_prompt": messages})
+            span.set_outputs({"prompt": prompt})
+
+        # LLMに回答を生成させる
+        with mlflow.start_span(name="generate_answer", span_type="LLM") as span:
+            params.stream = True # this time, we set stream=True
+            response = self.chat_model.completions.create(
+                model=self.model_config.get("llm_endpoint_name"),
+                prompt=prompt,
+                # stream=True,  # this time, we set stream=True
+                **(params.to_dict() if params is not None else {'temperature': 0.1})
+            )
+            span.set_inputs({"prompt": prompt, "params": params})
+            span.set_outputs({"answer": response})
+
+        for chunk in response:
+            if not chunk.choices or not chunk.choices[0].text:
+                continue
+
+            yield self._create_chat_completion_chunk(chunk.choices[0].text, chunk.id)
+
+
+        # yield self._create_chat_completion_chunk(f"Echoing back your last question, word by word. You sent me this request from a client with type: ")
+        # for word in last_user_question_text.split(" "):
+        #     yield self._create_chat_completion_chunk(word)
+
+
     
 
 
@@ -153,5 +183,15 @@ mlflow.models.set_model(wrapper)
 
 # input_messages = [ChatMessage(role="user", content="東京の首都は京都だっけ？")]
 # params_with_custom_inputs = ChatParams(temperature=0.1)
+
+# # Normal predict
 # response = wrapper.predict(context=None, messages=input_messages, params=params_with_custom_inputs)
 # print(response.to_dict())
+
+# # Streaming predict
+# for event in wrapper.predict_stream(context=None, messages=input_messages, params=params_with_custom_inputs):
+#     print(event.choices[0].delta.content)
+
+# COMMAND ----------
+
+

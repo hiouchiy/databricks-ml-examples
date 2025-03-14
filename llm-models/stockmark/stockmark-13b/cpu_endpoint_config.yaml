@@ -1,0 +1,2 @@
+hf_model_name: stockmark/stockmark-13b-instruct
+llm_endpoint_name: hiroshi-stockmark-13b-instruct-completion
