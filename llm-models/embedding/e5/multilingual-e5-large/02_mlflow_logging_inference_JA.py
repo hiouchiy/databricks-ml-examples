@@ -5,9 +5,13 @@
 # MAGIC この例では、[multilingual-e5-large model](https://huggingface.co/intfloat/multilingual-e5-large)を `sentence_transformers` フレーバーで MLFLow にロギングし、Unity Catalog でモデルを管理し、モデル提供エンドポイントを作成する方法を示します。
 # MAGIC
 # MAGIC このノートブックの環境
-# MAGIC - ランタイム: 15.2 ML Runtime
-# MAGIC - インスタンス: AWS の `i3.xlarge` または Azure の `Standard_D4DS_v5` 
+# MAGIC - ランタイム: サーバーレスノートブック
 # MAGIC
+
+# COMMAND ----------
+
+# MAGIC %pip install sentence_transformers==4.1.0 mlflow==2.21.3
+# MAGIC dbutils.library.restartPython()
 
 # COMMAND ----------
 
@@ -33,13 +37,31 @@ signature = mlflow.models.infer_signature(
     model.encode(sentences),
 )
 
+signature
+
+# COMMAND ----------
+
 # MLFlowのSentence Transformerフレーバーを使って登録
 with mlflow.start_run() as run:  
     mlflow.sentence_transformers.log_model(
       model, 
       "multilingual-e5-large-embedding", 
       signature=signature,
-      input_example=sentences)
+      input_example=sentences,
+      extra_pip_requirements=["torch==2.6.0", "torchvision==0.21.0"]) # Obviously set specific version to avoid a deployment error
+
+# COMMAND ----------
+
+run_id = run.info.run_id
+model_uri = f"runs:/{run_id}/model"
+
+mlflow.models.predict(
+  model_uri=model_uri,
+  input_data=sentences,
+  # content_type="json",
+  # env_manager="uv",
+  # pip_requirements_override=["pillow==10.3.0", "scipy==1.13.0"],
+)
 
 # COMMAND ----------
 
@@ -59,14 +81,14 @@ mlflow.set_registry_uri("databricks-uc")
 # COMMAND ----------
 
 # MAGIC %sql
-# MAGIC USE CATALOG japan_practical_demo;
+# MAGIC USE CATALOG hiroshi;
 # MAGIC CREATE SCHEMA IF NOT EXISTS models;
 
 # COMMAND ----------
 
 # Unityカタログへのモデル登録
 
-registered_name = "japan_practical_demo.models.multilingual-e5-large" # UCモデル名は<カタログ名>.<スキーマ名>.<モデル名>のパターンに従っており、カタログ名、スキーマ名、登録モデル名に対応していることに注意してください。
+registered_name = "hiroshi.models.multilingual-e5-large" # UCモデル名は<カタログ名>.<スキーマ名>.<モデル名>のパターンに従っており、カタログ名、スキーマ名、登録モデル名に対応していることに注意してください。
 result = mlflow.register_model(
     "runs:/"+run.info.run_id+"/multilingual-e5-large-embedding",
     registered_name,
@@ -101,7 +123,7 @@ loaded_model.predict(
 
 # MAGIC %md
 # MAGIC ## モデル提供エンドポイントの作成
-# MAGIC モデルが登録されたら、APIを使用してDatabricks GPU Model Serving Endpointを作成し、`bge-large-en`モデルをサービングしていきます。
+# MAGIC モデルが登録されたら、APIを使用してDatabricks GPU Model Serving Endpointを作成し、`multilingual-e5-large`モデルをサービングしていきます。
 # MAGIC
 # MAGIC 以下のデプロイにはGPUモデルサービングが必要です。GPU モデルサービングの詳細については、Databricks チームにお問い合わせいただくか、サインアップ [こちら](https://docs.google.com/forms/d/1-GWIlfjlIaclqDz6BPODI2j1Xg4f4WbFvBXyebBpN-Y/edit) してください。
 
@@ -117,9 +139,7 @@ token = dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiTok
 
 # COMMAND ----------
 
-# サービングエンドポイントの作成または更新
-from databricks.sdk import WorkspaceClient
-from databricks.sdk.service.serving import EndpointCoreConfigInput, ServedModelInput, ServedModelInputWorkloadSize, ServedModelInputWorkloadType
+from mlflow.deployments import get_deploy_client
 
 model_version = result  # mlflow.register_modelの返された結果
 
@@ -127,32 +147,30 @@ serving_endpoint_name = endpoint_name
 latest_model_version = model_version.version
 model_name = model_version.name
 
-w = WorkspaceClient()
-endpoint_config = EndpointCoreConfigInput(
+client = get_deploy_client("databricks")
+endpoint = client.create_endpoint(
     name=serving_endpoint_name,
-    served_models=[
-        ServedModelInput(
-            model_name=model_name,
-            model_version=latest_model_version,
-            workload_type=ServedModelInputWorkloadType.GPU_SMALL,
-            workload_size=ServedModelInputWorkloadSize.SMALL,
-            scale_to_zero_enabled=False
-        )
-    ]
+    config={
+        "served_entities": [
+            {
+                "entity_name": model_name,
+                "entity_version": latest_model_version,
+                "workload_type": "GPU_SMALL",
+                "workload_size": "Small",
+                "scale_to_zero_enabled": True
+            }
+        ]
+    }
 )
 
-existing_endpoint = next(
-    (e for e in w.serving_endpoints.list() if e.name == serving_endpoint_name), None
-)
-serving_endpoint_url = f"{databricks_url}/ml/endpoints/{serving_endpoint_name}"
-if existing_endpoint == None:
-    print(f"Creating the endpoint {serving_endpoint_url}, this will take a few minutes to package and deploy the endpoint...")
-    w.serving_endpoints.create_and_wait(name=serving_endpoint_name, config=endpoint_config)
-else:
-    print(f"Updating the endpoint {serving_endpoint_url} to version {latest_model_version}, this will take a few minutes to package and deploy the endpoint...")
-    w.serving_endpoints.update_config_and_wait(served_models=endpoint_config.served_models, name=serving_endpoint_name)
-    
-displayHTML(f'Your Model Endpoint Serving is now available. Open the <a href="/ml/endpoints/{serving_endpoint_name}">Model Serving Endpoint page</a> for more details.')
+# COMMAND ----------
+
+from datetime import timedelta
+from databricks.sdk import WorkspaceClient
+from databricks.sdk.service.serving import EndpointCoreConfigInput, ServedModelInput, ServedModelInputWorkloadSize, ServedModelInputWorkloadType
+
+w = WorkspaceClient()
+w.serving_endpoints.wait_get_serving_endpoint_not_updating(name=serving_endpoint_name, timeout=timedelta(minutes=60))
 
 # COMMAND ----------
 
@@ -186,7 +204,3 @@ end = time.time()
 
 print(endpoint_response)
 print(f'Time taken for querying endpoint in seconds: {end-start}')
-
-# COMMAND ----------
-
-
