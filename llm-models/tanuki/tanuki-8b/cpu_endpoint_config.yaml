@@ -1,0 +1,2 @@
+hf_model_name: weblab-GENIAC/Tanuki-8B-dpo-v1.0
+llm_endpoint_name: tanuki-8b-dpo-v1-0-endpoint-pt-completion
